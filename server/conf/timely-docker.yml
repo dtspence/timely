@@ -1,6 +1,8 @@
 timely:
   metrics-table: timely.metrics
   meta-table: timely.meta
+  metrics-compaction:
+    auto-configure: false
   metric-age-off-days:
     default: 7
   metrics-report-ignored-tags:

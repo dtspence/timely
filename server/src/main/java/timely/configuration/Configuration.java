@@ -47,6 +47,9 @@ public class Configuration {
     @Valid
     @NestedConfigurationProperty
     private Websocket websocket = new Websocket();
+    @Valid
+    @NestedConfigurationProperty
+    private MetricsCompaction metricsCompaction = new MetricsCompaction();
 
     public String getMetricsTable() {
         return metricsTable;
@@ -129,5 +132,9 @@ public class Configuration {
 
     public VisibilityCache getVisibilityCache() {
         return visibilityCache;
+    }
+
+    public MetricsCompaction getMetricsCompaction() {
+        return metricsCompaction;
     }
 }

@@ -32,6 +32,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import com.google.common.collect.ImmutableMap;
 import io.netty.handler.codec.http.HttpResponseStatus;
 import org.apache.accumulo.core.client.BatchScanner;
 import org.apache.accumulo.core.client.BatchWriter;
@@ -48,6 +49,7 @@ import org.apache.accumulo.core.client.TableExistsException;
 import org.apache.accumulo.core.client.TableNotFoundException;
 import org.apache.accumulo.core.client.ZooKeeperInstance;
 import org.apache.accumulo.core.client.security.tokens.PasswordToken;
+import org.apache.accumulo.core.conf.Property;
 import org.apache.accumulo.core.data.Key;
 import org.apache.accumulo.core.data.Mutation;
 import org.apache.accumulo.core.data.PartialKey;
@@ -59,6 +61,8 @@ import org.apache.accumulo.core.security.Authorizations;
 import org.apache.accumulo.core.security.ColumnVisibility;
 import org.apache.accumulo.core.security.VisibilityEvaluator;
 import org.apache.accumulo.core.util.Pair;
+import org.apache.accumulo.tserver.compaction.DefaultCompactionStrategy;
+import org.apache.commons.configuration.MapConfiguration;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.hadoop.io.Text;
 import org.slf4j.Logger;
@@ -90,6 +94,8 @@ import timely.sample.Sample;
 import timely.sample.iterators.AggregationIterator;
 import timely.sample.iterators.DownsampleIterator;
 import timely.store.cache.DataStoreCache;
+import timely.store.compaction.MetricCompactionStrategy;
+import timely.store.compaction.TieredCompactionStrategy;
 import timely.store.iterators.RateIterator;
 import timely.util.MetaKeySet;
 
@@ -221,6 +227,19 @@ public class DataStoreImpl implements DataStore {
                     throw e1;
                 }
             }
+            try {
+                if (conf.getMetricsCompaction().getAutoConfigure()) {
+                    this.removeCompactionStrategy(connector, metricsTable);
+                    this.applyCompactionStrategy(connector, metricsTable, conf);
+                }
+            } catch (Exception e1) {
+                Throwable cause = e1.getCause();
+                if (cause.getMessage().contains("conflict")) {
+                    LOG.info("ignoring compaction conflict due to multiple instances starting up");
+                } else {
+                    throw e1;
+                }
+            }
 
             metaTable = conf.getMetaTable();
             if (!tableIdMap.containsKey(metaTable)) {
@@ -284,6 +303,42 @@ public class DataStoreImpl implements DataStore {
                 con.tableOperations().removeIterator(tableName, name, AGEOFF_SCOPES);
             }
         }
+    }
+
+    private void removeCompactionStrategy(Connector con, String tableName) throws Exception {
+        con.tableOperations().removeProperty(tableName, Property.TABLE_COMPACTION_STRATEGY.getKey());
+        MapConfiguration config = new MapConfiguration(
+                ImmutableMap.copyOf(con.tableOperations().getProperties(tableName)));
+        String prefixKey = Property.TABLE_COMPACTION_STRATEGY_PREFIX.getKey();
+        String prefixSearchKey = prefixKey.substring(0, prefixKey.length() - 1);
+        org.apache.commons.configuration.Configuration prefixes = config.subset(prefixSearchKey);
+        Iterator keys = prefixes.getKeys();
+        while (keys.hasNext()) {
+            String key = Property.TABLE_COMPACTION_STRATEGY_PREFIX.getKey() + keys.next();
+            con.tableOperations().removeProperty(tableName, key);
+        }
+    }
+
+    private void applyCompactionStrategy(Connector con, String tableName, Configuration conf) throws Exception {
+        Map<String, HashMap<String, String>> tiers = new LinkedHashMap<>();
+        tiers.put(DefaultCompactionStrategy.class.getName(), conf.getMetricsCompaction().getDefaultStrategyOptions());
+        tiers.put(MetricCompactionStrategy.class.getName(), conf.getMetricsCompaction().getMetricStrategyOptions());
+        int idx = 0;
+        for (Map.Entry<String, HashMap<String, String>> e : tiers.entrySet()) {
+            String tierIdx = TieredCompactionStrategy.TIERED_PREFIX + idx + ".";
+            String tierClass = Property.TABLE_COMPACTION_STRATEGY_PREFIX.getKey() + tierIdx
+                    + TieredCompactionStrategy.TIERED_CLASS;
+            String tierOpts = Property.TABLE_COMPACTION_STRATEGY_PREFIX.getKey() + tierIdx
+                    + TieredCompactionStrategy.TIERED_OPTS + ".";
+            con.tableOperations().setProperty(tableName, tierClass, e.getKey());
+            for (Map.Entry<String, String> kv : e.getValue().entrySet()) {
+                con.tableOperations().setProperty(tableName, tierOpts + kv.getKey(), kv.getValue());
+            }
+            idx++;
+        }
+
+        connector.tableOperations().setProperty(tableName, Property.TABLE_COMPACTION_STRATEGY.getKey(),
+                TieredCompactionStrategy.class.getName());
     }
 
     private void applyMetricAgeOffIterator(Connector con, String tableName) throws Exception {

@@ -1,7 +1,9 @@
 package timely.test.integration;
 
 import static com.google.common.util.concurrent.Uninterruptibles.sleepUninterruptibly;
+import static junit.framework.TestCase.assertTrue;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 
 import java.util.HashMap;
 import java.util.List;
@@ -9,6 +11,10 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 
+import com.google.common.collect.ImmutableMap;
+import org.apache.accumulo.core.client.Connector;
+import org.apache.accumulo.core.conf.Property;
+import org.apache.accumulo.tserver.compaction.DefaultCompactionStrategy;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
 import timely.Server;
@@ -18,6 +24,8 @@ import timely.api.response.timeseries.QueryResponse;
 import timely.configuration.Configuration;
 import timely.store.MetricAgeOffIterator;
 import timely.store.cache.DataStoreCache;
+import timely.store.compaction.MetricCompactionStrategy;
+import timely.store.compaction.TieredCompactionStrategy;
 import timely.test.IntegrationTest;
 
 @Category(IntegrationTest.class)
@@ -50,6 +58,12 @@ public class DataStoreIT extends OneWaySSLBase {
         HashMap<String, Integer> ageOffHours = new HashMap<>();
         ageOffHours.put(DataStoreCache.DEFAULT_AGEOFF_KEY, 23);
         conf.getCache().setMetricAgeOffHours(ageOffHours);
+        testDefaultAgeOff(conf);
+    }
+
+    @Test
+    public void testDefaultAgeOffWithMetricCompactionEnabled() throws Exception {
+        conf.getMetricsCompaction().setAutoConfigure(true);
         testDefaultAgeOff(conf);
     }
 
@@ -96,6 +110,12 @@ public class DataStoreIT extends OneWaySSLBase {
     @Test
     public void testMultipleAgeOffWithCache() throws Exception {
         conf.getCache().setEnabled(true);
+        testMultipleAgeOff(conf);
+    }
+
+    @Test
+    public void testMultipleAgeOffWithMetricCompaction() throws Exception {
+        conf.getMetricsCompaction().setAutoConfigure(true);
         testMultipleAgeOff(conf);
     }
 
@@ -161,4 +181,72 @@ public class DataStoreIT extends OneWaySSLBase {
         }
     }
 
+    @Test
+    public void testMetricCompactionPropertyDisabledByDefault() throws Exception {
+        final Server s = new Server(conf);
+        s.run();
+        try {
+            Connector con = mac.getConnector(MAC_ROOT_USER, MAC_ROOT_PASSWORD);
+            Map<String, String> checkOpts = ImmutableMap
+                    .copyOf(con.tableOperations().getProperties(conf.getMetricsTable()));
+            String class1 = Property.TABLE_COMPACTION_STRATEGY_PREFIX + "tier.0.class";
+            assertFalse(checkOpts.containsKey(class1));
+            assertEquals(DefaultCompactionStrategy.class.getName(),
+                    checkOpts.get(Property.TABLE_COMPACTION_STRATEGY.getKey()));
+        } finally {
+            s.shutdown();
+        }
+    }
+
+    @Test
+    public void testMetricCompactionRemovesExistingKeys() throws Exception {
+        String testKey = Property.TABLE_COMPACTION_STRATEGY_PREFIX + "tier.n.class";
+        conf.getMetricsCompaction().setAutoConfigure(true);
+        Connector con = mac.getConnector(MAC_ROOT_USER, MAC_ROOT_PASSWORD);
+        if (!con.namespaceOperations().exists("timely")) {
+            con.namespaceOperations().create("timely");
+        }
+        con.tableOperations().create(conf.getMetricsTable());
+        con.tableOperations().setProperty(conf.getMetricsTable(),
+                Property.TABLE_COMPACTION_STRATEGY_PREFIX + "tier.n.class", "test-value");
+        final Server s = new Server(conf);
+        s.run();
+        try {
+            Map<String, String> checkOpts = ImmutableMap
+                    .copyOf(con.tableOperations().getProperties(conf.getMetricsTable()));
+            assertFalse(checkOpts.containsKey(testKey));
+        } finally {
+            s.shutdown();
+        }
+    }
+
+    @Test
+    public void testMetricCompactionPropertyCreation() throws Exception {
+        conf.getMetricsCompaction().setAutoConfigure(true);
+        conf.getMetricsCompaction().getDefaultStrategyOptions().put("test1", "value1");
+        conf.getMetricsCompaction().getMetricStrategyOptions().put("test2", "value2");
+        final Server s = new Server(conf);
+        s.run();
+        try {
+            String class1 = Property.TABLE_COMPACTION_STRATEGY_PREFIX + "tier.0.class";
+            String class2 = Property.TABLE_COMPACTION_STRATEGY_PREFIX + "tier.1.class";
+            String optKey1 = Property.TABLE_COMPACTION_STRATEGY_PREFIX + "tier.0.opts.test1";
+            String optKey2 = Property.TABLE_COMPACTION_STRATEGY_PREFIX + "tier.1.opts.test2";
+            Connector con = mac.getConnector(MAC_ROOT_USER, MAC_ROOT_PASSWORD);
+            Map<String, String> checkOpts = ImmutableMap
+                    .copyOf(con.tableOperations().getProperties(conf.getMetricsTable()));
+            assertTrue(checkOpts.containsKey(class1));
+            assertTrue(checkOpts.containsKey(class2));
+            assertTrue(checkOpts.containsKey(optKey1));
+            assertTrue(checkOpts.containsKey(optKey2));
+            assertEquals(DefaultCompactionStrategy.class.getName(), checkOpts.get(class1));
+            assertEquals(MetricCompactionStrategy.class.getName(), checkOpts.get(class2));
+            assertEquals("value1", checkOpts.get(optKey1));
+            assertEquals("value2", checkOpts.get(optKey2));
+            assertEquals(TieredCompactionStrategy.class.getName(),
+                    checkOpts.get(Property.TABLE_COMPACTION_STRATEGY.getKey()));
+        } finally {
+            s.shutdown();
+        }
+    }
 }
